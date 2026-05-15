@@ -40,3 +40,4 @@ Runner VM: ub-server
 Runner IP: 192.168.1.129
 Pipeline status: [![Hello Pipeline](https://github.com/Hibr-gech/cis-410-cybersecurity-automation/actions/workflows/hello-pipeline.yml/badge.svg)](https://github.com/Hibr-gech/cis-410-cybersecurity-automation/actions/workflows/hello-pipeline.yml)
 # Deployment Trigger - week 4
+# Forced Deployment Trigger - week 4
