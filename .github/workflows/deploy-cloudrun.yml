@@ -1,0 +1,119 @@
+# .github/workflows/deploy-cloudrun.yml
+# ─────────────────────────────────────────────────────────────────────────────
+# CIS 410 — Week 8: Build, Push, and Deploy to Cloud Run
+#
+# TRIGGER: Manual only (workflow_dispatch)
+# This mirrors the on-premise deploy-staging.yml and deploy-prod.yml
+# from Week 4 — human decision required before any deployment.
+#
+# WHAT IT DOES:
+#   1. Checks out the repository code
+#   2. Authenticates to GCP via OIDC (no stored credentials)
+#   3. Configures Docker to push to Artifact Registry
+#   4. Builds the Docker image and pushes to Artifact Registry
+#      Tagged with the commit SHA — never :latest
+#   5. Deploys the new image to Cloud Run
+#   6. Prints the live service URL
+#
+# GITHUB VARIABLES REQUIRED (Settings → Secrets and variables → Variables):
+#   WIF_PROVIDER     — Workload Identity Provider path (from Week 7)
+#   SA_EMAIL         — Service account email (from Week 7)
+#   TF_VAR_PROJECT_ID — Your GCP project ID
+#
+# HOW TO TRIGGER:
+#   GitHub → your repo → Actions → Deploy to Cloud Run → Run workflow
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy to Cloud Run
+
+on:
+  workflow_dispatch:   # manual trigger — intentional promotion gate
+
+# ── Shared environment variables ─────────────────────────────────────────────
+# Defined once here, available in all steps below.
+env:
+  REGION:   us-central1
+  REGISTRY: us-central1-docker.pkg.dev
+  REPO:     cis410-app          # Artifact Registry repository name
+  IMAGE:    flask-app            # Docker image name
+  SERVICE:  cis410-flask-app    # Cloud Run service name
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write   # REQUIRED: allows GitHub to request an OIDC token
+
+    steps:
+      # ── Step 1: Checkout ───────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Step 2: OIDC Authentication ────────────────────────────────────────
+      # Exchanges GitHub's OIDC token for a temporary GCP access token.
+      # No service account key is stored anywhere.
+      # This replaces the DEV_SSH_KEY / STAGING_SSH_KEY / PROD_SSH_KEY
+      # secrets pattern from Weeks 3-5.
+      - name: Authenticate to GCP via OIDC
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.SA_EMAIL }}
+
+      # ── Step 3: Cloud SDK Setup ────────────────────────────────────────────
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      # ── Step 4: Configure Docker ───────────────────────────────────────────
+      # Writes Artifact Registry credentials to ~/.docker/config.json
+      # so docker build and docker push authenticate automatically.
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+
+      # ── Step 5: Build and Push ─────────────────────────────────────────────
+      # Builds the image and pushes to Artifact Registry.
+      # Tagged with the full git commit SHA — 40 characters, globally unique.
+      # This tag is what makes every deployment traceable to a specific commit.
+      #
+      # ${{ github.sha }} is the full 40-character commit SHA.
+      # It maps exactly to a commit in your git log.
+      - name: Build and push image
+        run: |
+          PROJECT_ID=${{ vars.TF_VAR_PROJECT_ID }}
+          IMAGE_PATH=${{ env.REGISTRY }}/${PROJECT_ID}/${{ env.REPO }}/${{ env.IMAGE }}:${{ github.sha }}
+          docker build -t ${IMAGE_PATH} .
+          docker push ${IMAGE_PATH}
+          # Save the full image path for the deploy step
+          echo "IMAGE_PATH=${IMAGE_PATH}" >> $GITHUB_ENV
+
+      # ── Step 6: Deploy to Cloud Run ────────────────────────────────────────
+      # Deploys the new image to the existing Cloud Run service.
+      # --quiet suppresses interactive prompts.
+      # --platform managed means Cloud Run fully managed (not Kubernetes).
+      # --allow-unauthenticated makes the service publicly accessible.
+      #
+      # This is the Cloud Run equivalent of:
+      #   appleboy/ssh-action → docker stop → docker run (from Week 3)
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE }} \
+            --image ${{ env.IMAGE_PATH }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --max-instances 3 \
+            --quiet
+
+      # ── Step 7: Print Service URL ──────────────────────────────────────────
+      # Retrieves and prints the live service URL so you can verify
+      # the deployment by opening it in a browser.
+      - name: Print service URL
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE }} \
+            --region ${{ env.REGION }} \
+            --format "value(status.url)")
+          echo "✅ Service deployed successfully"
+          echo "🌐 URL: ${SERVICE_URL}"
+          echo "🔖 Image: ${{ env.IMAGE_PATH }}"
